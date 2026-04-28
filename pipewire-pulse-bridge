@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+
+PORT=30212
+
+VENMIC_PID=""
+PIPE_PID=""
+SINK_NAME="pipewire-pulse-bridge"
+SINK_ID=""
+
+SCRIPT="$0"
+
+
+while [ -L "$SCRIPT" ] ; do
+    LINK=$(readlink "$SCRIPT")
+    case "$LINK" in
+        /*)
+            SCRIPT="$LINK"
+            ;;
+        *)
+            SCRIPT="$(dirname "$SCRIPT")/$LINK"
+            ;;
+    esac
+done
+
+
+ROOT=$(dirname "$SCRIPT")
+ROOT=$(cd "$ROOT"; pwd)
+
+ts() {
+  echo "[$(date +"%Y-%m-%d %H:%M:%S.%3N")] "
+}
+cleanup() {
+
+
+  if [[ -n "$PIPE_PID" ]]; then
+    printf "$(ts)\033[31m[stop]\033[0m destroying bridge\n"
+    kill "$PIPE_PID" 2>/dev/null
+  fi
+
+  if [[ -n "$VENMIC_PID" ]]; then
+    printf "$(ts)\033[31m[stop]\033[0m ending venmic-server\n"
+    kill "$VENMIC_PID" 2>/dev/null
+  fi
+
+  if [[ -n "$SINK_ID" ]]; then
+  printf "$(ts)\033[31m[stop]\033[0m erasing void sink\n"
+  pactl unload-module "$SINK_ID" 2>/dev/null 2>/dev/null
+  fi
+
+ printf "$(ts)\033[31m[stopped]\033[0m\n"
+}
+
+
+trap cleanup EXIT INT TERM
+
+printf "$(ts)\033[32m[start]\033[0m launching venmic-server\n"
+
+"$ROOT/venmic-server" "$PORT" &
+VENMIC_PID=$!
+
+sleep 1
+
+printf "$(ts)\033[32m[start]\033[0m creating pipewire pulse bridge sink void\n"
+
+SINK_ID=$(pactl load-module module-null-sink \
+  sink_name="$SINK_NAME-void" \
+  sink_properties=device.description="$SINK_NAME")
+
+printf "$(ts)\033[32m[start]\033[0m enabling venmic bridge mode\n"
+
+curl -s -X POST "http://localhost:$PORT/link" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "exclude": [
+      { "client.api": "pipewire-pulse" }
+    ],
+    "ignore_devices": true,
+    "workaround": [
+      { "node.name": "Chrome" }
+    ]
+  }'
+
+printf "$(ts)\033[32m[start]\033[0m creating pipewire pulse bridge\n"
+
+stdbuf -o0 pw-cat \
+  --properties=node.name=\"$SINK_NAME\" \
+  --record \
+  --target vencord-screen-share \
+  --rate 48000 \
+  --channels 2 \
+  --format s16 \
+  --latency 1 \
+  --quality 0 \
+  --raw - | stdbuf -i0 -o0 pacat \
+  --playback \
+  --raw \
+  --rate=48000 \
+  --channels=2 \
+  --format=s16le \
+  --latency-msec=2 \
+  --process-time-msec=2 \
+  --no-remix \
+  --no-remap \
+  --property=application.name="$SINK_NAME" \
+  --property=media.name="$SINK_NAME" \
+  --property=node.name="$SINK_NAME" \
+  --property=media.class="Stream/Output/Audio" \
+  --device="$SINK_NAME-void" &
+
+PIPE_PID=$!
+
+printf "$(ts)\033[32m[started]\033[0m\n"
+wait "$PIPE_PID"
